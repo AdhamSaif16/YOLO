@@ -110,12 +110,12 @@ def predict(file: UploadFile = File(...)):
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
 
-    took_time = round(time.time() - start_time,2)
+    time_took = round(time.time() - start_time,2)
     return {
         "prediction_uid": uid, 
         "detection_count": len(results[0].boxes),
         "labels": detected_labels,
-        "time_took": took_time
+        "time_took": time_took
     }
 
 @app.get("/prediction/{uid}")

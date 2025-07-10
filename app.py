@@ -117,6 +117,14 @@ def predict(file: UploadFile = File(...)):
         "labels": detected_labels,
         "time_took": time_took
     }
+@app.get("/prediction/count")
+def get_prediction_count():
+    """
+    Get prediction count from last week
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        count = conn.execute("SELECT count(*) FROM prediction_sessions WHERE timestamp >= DATETIME('now', '-7 days')").fetchall()
+    return {"count": count[0][0]}   
 
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str):
@@ -220,7 +228,8 @@ def get_prediction_image(uid: str, request: Request):
         return FileResponse(image_path, media_type="image/jpeg")
     else:
         # If the client doesn't accept image, respond with 406 Not Acceptable
-        raise HTTPException(status_code=406, detail="Client does not accept an image format")
+        raise HTTPException(status_code=406, detail="Client does not accept an image format") 
+    
 
 @app.get("/health")
 def health():

@@ -1,3 +1,4 @@
+import glob
 import time
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -117,39 +118,88 @@ def predict(file: UploadFile = File(...)):
         "labels": detected_labels,
         "time_took": time_took
     }
-
-@app.get("/prediction/{uid}")
-def get_prediction_by_uid(uid: str):
+@app.get("/prediction/count")
+def get_prediction_count():
     """
-    Get prediction session by uid with all detected objects
+    Get prediction count from last week
     """
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        # Get prediction session
-        session = conn.execute("SELECT * FROM prediction_sessions WHERE uid = ?", (uid,)).fetchone()
-        if not session:
+        count = conn.execute("SELECT count(*) FROM prediction_sessions WHERE timestamp >= DATETIME('now', '-7 days')").fetchall()
+    return {"count": count[0][0]} 
+
+@app.get("/labels")
+def get_uniqe_labels():
+    """
+    Get all unique labels from detection objects
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT DISTINCT label FROM detection_objects do join prediction_sessions ps ON do.prediction_uid = ps.uid WHERE ps.timestamp >= DATETIME('now', '-7 days')").fetchall()
+    labels=[]
+    for row in rows:
+        labels.append(row[0])
+    return {"labels": labels}
+
+@app.delete("/prediction/{uid}")
+def delete_prediction(uid: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        con1 = conn.execute("DELETE FROM detection_objects WHERE prediction_uid = ?", (uid,))
+        if con1.rowcount == 0:
             raise HTTPException(status_code=404, detail="Prediction not found")
-            
-        # Get all detection objects for this prediction
-        objects = conn.execute(
-            "SELECT * FROM detection_objects WHERE prediction_uid = ?", 
-            (uid,)
-        ).fetchall()
         
-        return {
-            "uid": session["uid"],
-            "timestamp": session["timestamp"],
-            "original_image": session["original_image"],
-            "predicted_image": session["predicted_image"],
-            "detection_objects": [
-                {
-                    "id": obj["id"],
-                    "label": obj["label"],
-                    "score": obj["score"],
-                    "box": obj["box"]
-                } for obj in objects
-            ]
-        }
+        con2 = conn.execute("DELETE FROM prediction_sessions WHERE uid = ?", (uid,))
+        if con2.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+        
+        conn.commit()
+
+    # Check for the file with any of the known image extensions
+    deleted = False
+    for ext in [".jpg", ".jpeg", ".png"]:
+        upload_path = os.path.join(UPLOAD_DIR, uid + ext)
+        predict_path = os.path.join(PREDICTED_DIR, uid + ext)
+
+        if os.path.exists(upload_path):
+            os.remove(upload_path)
+            deleted = True
+        if os.path.exists(predict_path):
+            os.remove(predict_path)
+            deleted = True
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Prediction file not found")
+
+    return "Successfully Deleted"
+        
+
+@app.delete("/prediction/{uid}")
+def delete_prediction(uid: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        con1 = conn.execute("DELETE FROM detection_objects WHERE prediction_uid = ?", (uid,))
+        if con1.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+        
+        con2 = conn.execute("DELETE FROM prediction_sessions WHERE uid = ?", (uid,))
+        if con2.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+        
+        conn.commit()
+
+    deleted = False
+    for ext in [".jpg", ".jpeg", ".png"]:
+        upload_path = os.path.join(UPLOAD_DIR, uid + ext)
+        predict_path = os.path.join(PREDICTED_DIR, uid + ext)
+
+        if os.path.exists(upload_path):
+            os.remove(upload_path)
+            deleted = True
+        if os.path.exists(predict_path):
+            os.remove(predict_path)
+            deleted = True
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Prediction file not found")
+
+    return "Successfully Deleted"
 
 @app.get("/predictions/label/{label}")
 def get_predictions_by_label(label: str):
@@ -220,7 +270,8 @@ def get_prediction_image(uid: str, request: Request):
         return FileResponse(image_path, media_type="image/jpeg")
     else:
         # If the client doesn't accept image, respond with 406 Not Acceptable
-        raise HTTPException(status_code=406, detail="Client does not accept an image format")
+        raise HTTPException(status_code=406, detail="Client does not accept an image format") 
+    
 
 @app.get("/health")
 def health():
@@ -231,4 +282,4 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run("app:app", host="0.0.0.0", port=8080,reload=True)

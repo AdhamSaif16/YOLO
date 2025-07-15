@@ -12,6 +12,7 @@ class TestPredictionCount(unittest.TestCase):
         if os.path.exists(DB_PATH):
             os.remove(DB_PATH)
         init_db()
+        
         self.test_image = Image.new('RGB', (100, 100), color='red')
         self.image_bytes = io.BytesIO()
         self.test_image.save(self.image_bytes, format='JPEG')

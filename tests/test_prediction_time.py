@@ -14,6 +14,7 @@ class TestProcessingTime(unittest.TestCase):
         self.client = TestClient(app)
         
         # Create a simple test image
+        
         self.test_image = Image.new('RGB', (100, 100), color='red')
         self.image_bytes = io.BytesIO()
         self.test_image.save(self.image_bytes, format='JPEG')

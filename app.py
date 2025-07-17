@@ -10,7 +10,8 @@ import os
 import uuid
 import shutil
 from typing import Optional
-
+from fastapi import Depends
+from starlette.status import HTTP_401_UNAUTHORIZED
 
 # Disable GPU usage
 import torch
@@ -44,7 +45,7 @@ def add_test_user():
 #return:
 #       id: if exist 
 #       none: else
-
+# the optional is to for the optional predict endpoint
 def verify_credentials(credentials: Optional[HTTPBasicCredentials]) -> Optional[int]:
     """
     Verify provided credentials. Return user_id if valid, None otherwise.
@@ -60,7 +61,15 @@ def verify_credentials(credentials: Optional[HTTPBasicCredentials]) -> Optional[
         user = conn.execute("SELECT * FROM users WHERE username = ? AND pass = ?", (username, password)).fetchone()
         return user["id"] if user else None
 
-
+def get_current_user(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> Optional[int]:
+    user_id = verify_credentials(credentials)
+    if user_id is None:
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return user_id
 ##########################################################  end of helper functions ############################################
 # Initialize SQLite
 def init_db():
@@ -166,7 +175,7 @@ def predict(file: UploadFile = File(...)):
         "time_took": time_took
     }
 @app.get("/prediction/count")
-def get_prediction_count():
+def get_prediction_count(user_id: int = Depends(get_current_user)):
     """
     Get prediction count from last week
     """

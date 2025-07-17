@@ -2,18 +2,23 @@ import glob
 import time
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
 import os
 import uuid
 import shutil
+from typing import Optional
+
 
 # Disable GPU usage
 import torch
 torch.cuda.is_available = lambda: False
 
 app = FastAPI()
+
+security = HTTPBasic()
 
 UPLOAD_DIR = "uploads/original"
 PREDICTED_DIR = "uploads/predicted"
@@ -28,16 +33,57 @@ os.makedirs(PREDICTED_DIR, exist_ok=True)
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")  
 
+############################################################### helper functions ###############################################
+
+#adding one demo user for testing: "user:pass"
+def add_test_user():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR IGNORE INTO users (username, pass) VALUES (?, ?)", ("user", "pass"))
+
+#a function that verifies that the credintials are right
+#return:
+#       id: if exist 
+#       none: else
+
+def verify_credentials(credentials: Optional[HTTPBasicCredentials]) -> Optional[int]:
+    """
+    Verify provided credentials. Return user_id if valid, None otherwise.
+    """
+    if credentials is None:
+        return None
+
+    username = credentials.username
+    password = credentials.password
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        user = conn.execute("SELECT * FROM users WHERE username = ? AND pass = ?", (username, password)).fetchone()
+        return user["id"] if user else None
+
+
+##########################################################  end of helper functions ############################################
 # Initialize SQLite
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
+
+        # Create users table to store the users credentials
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username UNIQUE NOT NULL,
+                pass TEXT
+            )
+        """)
+
         # Create the predictions main table to store the prediction session
         conn.execute("""
             CREATE TABLE IF NOT EXISTS prediction_sessions (
                 uid TEXT PRIMARY KEY,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 original_image TEXT,
-                predicted_image TEXT
+                predicted_image TEXT,
+                user_id INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """)
         
@@ -59,6 +105,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
 init_db()
+add_test_user()
 
 def save_prediction_session(uid, original_image, predicted_image):
     """

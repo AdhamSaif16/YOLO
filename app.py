@@ -116,15 +116,15 @@ def init_db():
 init_db()
 add_test_user()
 
-def save_prediction_session(uid, original_image, predicted_image):
+def save_prediction_session(uid, original_image, predicted_image,user_id=None):
     """
     Save prediction session to database
     """
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT INTO prediction_sessions (uid, original_image, predicted_image)
-            VALUES (?, ?, ?)
-        """, (uid, original_image, predicted_image))
+            INSERT INTO prediction_sessions (uid, original_image, predicted_image,user_id)
+            VALUES (?, ?, ?, ?)
+        """, (uid, original_image, predicted_image,user_id))
 
 def save_detection_object(prediction_uid, label, score, box):
     """

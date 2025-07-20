@@ -137,10 +137,14 @@ def save_detection_object(prediction_uid, label, score, box):
         """, (prediction_uid, label, score, str(box)))
 
 @app.post("/predict")
-def predict(file: UploadFile = File(...)):
+def predict(
+    file: UploadFile = File(...),
+    credentials: Optional[HTTPBasicCredentials] = Depends(security)
+):
     """
     Predict objects in an image
     """
+    user_id = verify_credentials(credentials)
     start_time = time.time()
     ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
@@ -156,7 +160,7 @@ def predict(file: UploadFile = File(...)):
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
 
-    save_prediction_session(uid, original_path, predicted_path)
+    save_prediction_session(uid, original_path, predicted_path, user_id)
     
     detected_labels = []
     for box in results[0].boxes:
@@ -184,7 +188,7 @@ def get_prediction_count(user_id: int = Depends(get_current_user)):
     return {"count": count[0][0]} 
 
 @app.get("/labels")
-def get_uniqe_labels():
+def get_uniqe_labels(user_id: int = Depends(get_current_user)):
     """
     Get all unique labels from detection objects
     """
@@ -196,7 +200,7 @@ def get_uniqe_labels():
     return {"labels": labels}
 
 @app.delete("/prediction/{uid}")
-def delete_prediction(uid: str):
+def delete_prediction(uid: str,user_id: int = Depends(get_current_user)):
     with sqlite3.connect(DB_PATH) as conn:
         con1 = conn.execute("DELETE FROM detection_objects WHERE prediction_uid = ?", (uid,))
         if con1.rowcount == 0:
@@ -226,39 +230,8 @@ def delete_prediction(uid: str):
 
     return "Successfully Deleted"
         
-
-@app.delete("/prediction/{uid}")
-def delete_prediction(uid: str):
-    with sqlite3.connect(DB_PATH) as conn:
-        con1 = conn.execute("DELETE FROM detection_objects WHERE prediction_uid = ?", (uid,))
-        if con1.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Prediction not found")
-        
-        con2 = conn.execute("DELETE FROM prediction_sessions WHERE uid = ?", (uid,))
-        if con2.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Prediction not found")
-        
-        conn.commit()
-
-    deleted = False
-    for ext in [".jpg", ".jpeg", ".png"]:
-        upload_path = os.path.join(UPLOAD_DIR, uid + ext)
-        predict_path = os.path.join(PREDICTED_DIR, uid + ext)
-
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
-            deleted = True
-        if os.path.exists(predict_path):
-            os.remove(predict_path)
-            deleted = True
-
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Prediction file not found")
-
-    return "Successfully Deleted"
-
 @app.get("/predictions/label/{label}")
-def get_predictions_by_label(label: str):
+def get_predictions_by_label(label: str,user_id: int = Depends(get_current_user)):
     """
     Get prediction sessions containing objects with specified label
     """
@@ -276,7 +249,7 @@ def get_predictions_by_label(label: str):
         return [{"uid": row["uid"], "timestamp": row["timestamp"]} for row in rows]
 
 @app.get("/predictions/score/{min_score}")
-def get_predictions_by_score(min_score: float):
+def get_predictions_by_score(min_score: float,user_id: int = Depends(get_current_user)):
     """
     Get prediction sessions containing objects with score >= min_score
     """
@@ -294,7 +267,7 @@ def get_predictions_by_score(min_score: float):
         return [{"uid": row["uid"], "timestamp": row["timestamp"]} for row in rows]
 
 @app.get("/image/{type}/{filename}")
-def get_image(type: str, filename: str):
+def get_image(type: str, filename: str,user_id: int = Depends(get_current_user)):
     """
     Get image by type and filename
     """
@@ -306,7 +279,7 @@ def get_image(type: str, filename: str):
     return FileResponse(path)
 
 @app.get("/prediction/{uid}/image")
-def get_prediction_image(uid: str, request: Request):
+def get_prediction_image(uid: str, request: Request,user_id: int = Depends(get_current_user)):
     """
     Get prediction image by uid
     """

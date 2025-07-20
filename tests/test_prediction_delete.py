@@ -23,7 +23,7 @@ class Test_Delete(unittest.TestCase):
     def test_detete_not_found(self):
         response2 = self.client.delete("/prediction/-1")
         self.assertEqual(response2.status_code, 401)
-        self.assertEqual(response2.json()["detail"], "Prediction not found")
+        self.assertEqual(response2.json()["detail"], "Not authenticated")
 
     
     def test_delete_prediction(self):

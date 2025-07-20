@@ -12,6 +12,7 @@ import shutil
 from typing import Optional
 from fastapi import Depends
 from starlette.status import HTTP_401_UNAUTHORIZED
+from typing import Annotated
 
 # Disable GPU usage
 import torch
@@ -60,7 +61,13 @@ def verify_credentials(credentials: Optional[HTTPBasicCredentials]) -> Optional[
         conn.row_factory = sqlite3.Row
         user = conn.execute("SELECT * FROM users WHERE username = ? AND pass = ?", (username, password)).fetchone()
         return user["id"] if user else None
-
+    
+async def optional_auth(request: Request) -> Optional[HTTPBasicCredentials]:
+    try:
+        return await security(request)
+    except HTTPException:
+        return None
+    
 def get_current_user(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> Optional[int]:
     user_id = verify_credentials(credentials)
     if user_id is None:
@@ -137,15 +144,23 @@ def save_detection_object(prediction_uid, label, score, box):
         """, (prediction_uid, label, score, str(box)))
 
 @app.post("/predict")
-def predict(
+async def predict(
+    request: Request,
     file: UploadFile = File(...),
-    credentials: Optional[HTTPBasicCredentials] = Depends(security)
+    credentials: Annotated[Optional[HTTPBasicCredentials], Depends(optional_auth)] = None
 ):
     """
     Predict objects in an image
     """
-    user_id = verify_credentials(credentials)
+    username = None
+    if credentials:
+        try:
+            user_id = verify_credentials(credentials)
+        except HTTPException:
+            user_id = None     #Invalid credentials still allow prediction, username remains null
+
     start_time = time.time()
+
     ext = os.path.splitext(file.filename)[1]
     uid = str(uuid.uuid4())
     original_path = os.path.join(UPLOAD_DIR, uid + ext)
@@ -156,12 +171,12 @@ def predict(
 
     results = model(original_path, device="cpu")
 
-    annotated_frame = results[0].plot()  # NumPy image with boxes
+    annotated_frame = results[0].plot()
     annotated_image = Image.fromarray(annotated_frame)
     annotated_image.save(predicted_path)
 
-    save_prediction_session(uid, original_path, predicted_path, user_id)
-    
+    save_prediction_session(uid, original_path, predicted_path,username)
+
     detected_labels = []
     for box in results[0].boxes:
         label_idx = int(box.cls[0].item())
@@ -171,13 +186,15 @@ def predict(
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
 
-    time_took = round(time.time() - start_time,2)
+    processing_time = round(time.time() - start_time, 2)
+
     return {
-        "prediction_uid": uid, 
+        "prediction_uid": uid,
         "detection_count": len(results[0].boxes),
         "labels": detected_labels,
-        "time_took": time_took
+        "time_took": processing_time
     }
+
 @app.get("/prediction/count")
 def get_prediction_count(user_id: int = Depends(get_current_user)):
     """

@@ -3,32 +3,38 @@ name: Run Tests
 on:
   pull_request:
     branches: 
-     - main
+      - main
+  push:
+    branches:
+      - main
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.12'
-    
-    - name: Install dependencies
-      run: |
-        pip install -r torch-requirements.txt
-        pip install -r requirements.txt
-        pip install pytest pytest-cov
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Run tests with coverage
-      run: |
-        pytest --cov=app --cov-report=xml --cov-report=html --cov-report=term-missing
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        fail_ci_if_error: true
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r torch-requirements.txt
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=app --cov-report=xml --cov-report=html --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          fail_ci_if_error: true

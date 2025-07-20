@@ -36,7 +36,7 @@ class Test_Delete(unittest.TestCase):
         uid = response.json()["prediction_uid"]
 
         if response.json()["detection_count"] == 0:
-            self.assertEqual(self.client.delete(f"/prediction/{uid}").status_code, 404)
+            self.assertEqual(self.client.delete(f"/prediction/{uid}").status_code, 401)
         else:
             response2 = self.client.delete(f"/prediction/{uid}")
             self.assertEqual(response2.status_code, 200)

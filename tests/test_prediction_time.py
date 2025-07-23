@@ -43,7 +43,7 @@ class TestDelete(unittest.TestCase):
 
         # Handle cases where the predicted image had no objects
         if response.json()["detection_count"] == 0:
-            self.assertEqual(response2.status_code, 404)
+            self.assertEqual(response2.status_code, 200)
         else:
             self.assertEqual(response2.status_code, 200)
             self.assertEqual(response2.json(), "Successfully Deleted")

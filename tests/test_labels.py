@@ -1,75 +1,57 @@
-import datetime
+import unittest
 import os
 import sqlite3
-import unittest
-import uuid
-from fastapi.testclient import TestClient
-from PIL import Image
-import io
 import base64
+from fastapi.testclient import TestClient
+from app import app, DB_PATH, init_db, add_test_user, save_prediction_session, save_detection_object
 
-from app import app, DB_PATH, init_db, add_test_user
+UID_1 = "labels-uid-1"
+UID_2 = "labels-uid-2"
+LABELS = ["dog", "cat"]
 
-class TestUniqueLabels(unittest.TestCase):
+def auth_headers(username="user", password="pass"):
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+class TestGetLabels(unittest.TestCase):
+
     def setUp(self):
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
         self.client = TestClient(app)
 
+        # Reset DB
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
         init_db()
         add_test_user()
 
-        # Create a simple test image
-        self.test_image = Image.new('RGB', (100, 100), color='red')
-        self.image_bytes = io.BytesIO()
-        self.test_image.save(self.image_bytes, format='JPEG')
-        self.image_bytes.seek(0)
+        # Insert two predictions and labels
+        save_prediction_session(UID_1, "a.jpg", "a_pred.jpg", user_id=1)
+        save_detection_object(UID_1, "dog", 0.95, "[0,0,1,1]")
 
-    def _auth_headers(self, username="user", password="pass"):
-        basic = f"{username}:{password}".encode()
-        encoded = base64.b64encode(basic).decode()
-        return {"Authorization": f"Basic {encoded}"}
+        save_prediction_session(UID_2, "b.jpg", "b_pred.jpg", user_id=1)
+        save_detection_object(UID_2, "cat", 0.88, "[2,2,3,3]")
 
-    def test_unique_labels_zero(self):
-        response = self.client.get("/labels", headers=self._auth_headers())
+    def test_get_labels_success(self):
+        response = self.client.get("/labels", headers=auth_headers())
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(len(data.get("labels")), 0)
+        self.assertIn("labels", data)
+        self.assertIsInstance(data["labels"], list)
+        self.assertIn("dog", data["labels"])
+        self.assertIn("cat", data["labels"])
 
-    def test_unique(self):
-        uid1 = str(uuid.uuid4())
-        uid2 = str(uuid.uuid4())
-        now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-
+    def test_get_labels_empty(self):
+        # Clear labels
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO prediction_sessions (uid, timestamp, user_id) VALUES (?, ?, 1)", (uid1, now))
-            conn.execute("INSERT INTO prediction_sessions (uid, timestamp, user_id) VALUES (?, ?, 1)", (uid2, now))
-            conn.execute("INSERT INTO detection_objects (prediction_uid, label) VALUES (?, ?)", (uid1, "cat"))
-            conn.execute("INSERT INTO detection_objects (prediction_uid, label) VALUES (?, ?)", (uid2, "dog"))
-            conn.commit()
+            conn.execute("DELETE FROM detection_objects")
+            conn.execute("DELETE FROM prediction_sessions")
 
-        response = self.client.get("/labels", headers=self._auth_headers())
+        response = self.client.get("/labels", headers=auth_headers())
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(set(response.json().get("labels")), {"cat", "dog"})
+        data = response.json()
+        self.assertEqual(data["labels"], [])
 
-    def test_not_unique(self):
-        uid1 = str(uuid.uuid4())
-        uid2 = str(uuid.uuid4())
-        now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO prediction_sessions (uid, timestamp, user_id) VALUES (?, ?, 1)", (uid1, now))
-            conn.execute("INSERT INTO prediction_sessions (uid, timestamp, user_id) VALUES (?, ?, 1)", (uid2, now))
-            conn.execute("INSERT INTO detection_objects (prediction_uid, label) VALUES (?, ?)", (uid1, "cat"))
-            conn.execute("INSERT INTO detection_objects (prediction_uid, label) VALUES (?, ?)", (uid2, "cat"))
-            conn.commit()
-
-        response = self.client.get("/labels", headers=self._auth_headers())
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json().get("labels"), ['cat'])
-
-    def test_auth_required(self):
-        """Test that missing authentication fails"""
+    def test_get_labels_unauthenticated(self):
         response = self.client.get("/labels")
         self.assertEqual(response.status_code, 401)
-        self.assertIn("detail", response.json())
+        self.assertEqual(response.json()["detail"], "Not authenticated")

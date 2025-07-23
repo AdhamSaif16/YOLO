@@ -3,6 +3,7 @@ import time
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pytest import Session
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
@@ -16,6 +17,9 @@ from typing import Annotated
 
 # Disable GPU usage
 import torch
+
+from db import get_db
+from repository import query_prediction_by_uid
 torch.cuda.is_available = lambda: False
 
 app = FastAPI()
@@ -155,9 +159,9 @@ async def predict(
     username = None
     if credentials:
         try:
-            user_id = verify_credentials(credentials)
+            username = verify_credentials(credentials)
         except HTTPException:
-            user_id = None     #Invalid credentials still allow prediction, username remains null
+            username = None     #Invalid credentials still allow prediction, username remains null
 
     start_time = time.time()
 
@@ -216,36 +220,73 @@ def get_uniqe_labels(user_id: int = Depends(get_current_user)):
         labels.append(row[0])
     return {"labels": labels}
 
-@app.delete("/prediction/{uid}")
-def delete_prediction(uid: str,user_id: int = Depends(get_current_user)):
+@app.get("/prediction/{uid}")
+def get_prediction_by_uid(uid: str, user_id: int = Depends(get_current_user)):
     with sqlite3.connect(DB_PATH) as conn:
-        con1 = conn.execute("DELETE FROM detection_objects WHERE prediction_uid = ?", (uid,))
-        if con1.rowcount == 0:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM prediction_sessions WHERE uid = ?", (uid,)).fetchone()
+
+        if not row:
             raise HTTPException(status_code=404, detail="Prediction not found")
-        
-        con2 = conn.execute("DELETE FROM prediction_sessions WHERE uid = ?", (uid,))
-        if con2.rowcount == 0:
+
+        if row["user_id"] is not None and row["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this prediction")
+
+        return {
+            "uid": row["uid"],
+            "timestamp": row["timestamp"],
+            "original_image": row["original_image"],
+            "predicted_image": row["predicted_image"]
+        }
+
+
+
+
+@app.delete("/prediction/{uid}")
+def delete_prediction(uid: str, user_id: int = Depends(get_current_user)):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        # Step 1: Check if the prediction session exists and belongs to the user
+        prediction = conn.execute(
+            "SELECT * FROM prediction_sessions WHERE uid = ?", (uid,)
+        ).fetchone()
+
+        if not prediction:
             raise HTTPException(status_code=404, detail="Prediction not found")
-        
+
+        # Optional: Enforce ownership check if you're tracking user-specific data
+        if prediction["user_id"] is not None and prediction["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this prediction")
+
+        # Step 2: Delete detection objects
+        conn.execute("DELETE FROM detection_objects WHERE prediction_uid = ?", (uid,))
+
+        # Step 3: Delete prediction session
+        conn.execute("DELETE FROM prediction_sessions WHERE uid = ?", (uid,))
         conn.commit()
 
-    # Check for the file with any of the known image extensions
+    # Step 4: Try to delete associated image files (original and predicted)
     deleted = False
     for ext in [".jpg", ".jpeg", ".png"]:
-        upload_path = os.path.join(UPLOAD_DIR, uid + ext)
-        predict_path = os.path.join(PREDICTED_DIR, uid + ext)
+        original_path = os.path.join(UPLOAD_DIR, uid + ext)
+        predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
-            deleted = True
-        if os.path.exists(predict_path):
-            os.remove(predict_path)
+        if os.path.exists(original_path):
+            os.remove(original_path)
             deleted = True
 
+        if os.path.exists(predicted_path):
+            os.remove(predicted_path)
+            deleted = True
+
+    # Optional but helpful: warn if files were not found
     if not deleted:
-        raise HTTPException(status_code=404, detail="Prediction file not found")
+        # You already deleted DB entries, so this is not a hard error — just a heads-up
+        return {"detail": "Database entry deleted, but no image files were found"}
 
-    return "Successfully Deleted"
+    return {"detail": "Successfully deleted prediction and associated files"}
+
         
 @app.get("/predictions/label/{label}")
 def get_predictions_by_label(label: str,user_id: int = Depends(get_current_user)):

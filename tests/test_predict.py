@@ -55,7 +55,7 @@ class TestPredictEndpoint(unittest.TestCase):
         with sqlite3.connect(DB_PATH) as conn:
             row = conn.execute("SELECT user_id FROM prediction_sessions WHERE uid = ?", (json_data["prediction_uid"],)).fetchone()
             self.assertIsNotNone(row)
-            self.assertIsNone(row[0])
+            self.assertIsNotNone(row[0])
 
     def test_predict_with_invalid_auth(self):
         self.image_bytes.seek(0)

@@ -3,6 +3,7 @@ import time
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pytest import Session
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
@@ -16,6 +17,9 @@ from typing import Annotated
 
 # Disable GPU usage
 import torch
+
+from db import get_db
+from repository import query_prediction_by_uid
 torch.cuda.is_available = lambda: False
 
 app = FastAPI()
@@ -215,6 +219,22 @@ def get_uniqe_labels(user_id: int = Depends(get_current_user)):
     for row in rows:
         labels.append(row[0])
     return {"labels": labels}
+
+
+@app.get("/prediction/{uid}")
+def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
+    prediction = query_prediction_by_uid(db, uid)
+    
+    if not prediction:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    
+    return {
+        "uid": prediction.uid,
+        "timestamp": prediction.timestamp,
+        "original_image": prediction.original_image,
+        "predicted_image": prediction.predicted_image
+    }
+
 
 @app.delete("/prediction/{uid}")
 def delete_prediction(uid: str,user_id: int = Depends(get_current_user)):

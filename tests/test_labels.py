@@ -1,57 +1,57 @@
+import unittest
 import os
 import sqlite3
-import pytest
+import base64
 from fastapi.testclient import TestClient
-from app import app, DB_PATH, init_db, add_test_user
+from app import app, DB_PATH, init_db, add_test_user, save_prediction_session, save_detection_object
 
-client = TestClient(app)
+UID_1 = "labels-uid-1"
+UID_2 = "labels-uid-2"
+LABELS = ["dog", "cat"]
 
-UID_DOG = "label-dog-1"
-UID_CAT = "label-cat-1"
+def auth_headers(username="user", password="pass"):
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
 
+class TestGetLabels(unittest.TestCase):
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_and_teardown():
-    init_db()
-    add_test_user()
+    def setUp(self):
+        self.client = TestClient(app)
 
-    with sqlite3.connect(DB_PATH) as conn:
-        # Insert prediction sessions
-        conn.execute("INSERT INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_DOG, "o1.jpg", "p1.jpg", 1))
-        conn.execute("INSERT INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_CAT, "o2.jpg", "p2.jpg", 1))
+        # Reset DB
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+        init_db()
+        add_test_user()
 
-        # Insert detection objects with known YOLO labels
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_DOG, "dog", 0.9, "[0,0,1,1]"))
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_CAT, "cat", 0.88, "[0,0,1,1]"))
+        # Insert two predictions and labels
+        save_prediction_session(UID_1, "a.jpg", "a_pred.jpg", user_id=1)
+        save_detection_object(UID_1, "dog", 0.95, "[0,0,1,1]")
 
-    yield
+        save_prediction_session(UID_2, "b.jpg", "b_pred.jpg", user_id=1)
+        save_detection_object(UID_2, "cat", 0.88, "[2,2,3,3]")
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM detection_objects WHERE prediction_uid IN (?, ?)", (UID_DOG, UID_CAT))
-        conn.execute("DELETE FROM prediction_sessions WHERE uid IN (?, ?)", (UID_DOG, UID_CAT))
+    def test_get_labels_success(self):
+        response = self.client.get("/labels", headers=auth_headers())
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("labels", data)
+        self.assertIsInstance(data["labels"], list)
+        self.assertIn("dog", data["labels"])
+        self.assertIn("cat", data["labels"])
 
+    def test_get_labels_empty(self):
+        # Clear labels
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM detection_objects")
+            conn.execute("DELETE FROM prediction_sessions")
 
-def test_get_predictions_by_label_dog():
-    response = client.get("/predictions/label/dog", auth=("user", "pass"))
-    assert response.status_code == 200
-    uids = [item["uid"] for item in response.json()]
-    assert UID_DOG in uids
-    assert UID_CAT not in uids
+        response = self.client.get("/labels", headers=auth_headers())
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["labels"], [])
 
-
-def test_get_predictions_by_label_cat():
-    response = client.get("/predictions/label/cat", auth=("user", "pass"))
-    assert response.status_code == 200
-    uids = [item["uid"] for item in response.json()]
-    assert UID_CAT in uids
-    assert UID_DOG not in uids
-
-
-def test_get_predictions_by_label_invalid():
-    response = client.get("/predictions/label/not_a_label", auth=("user", "pass"))
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid image type"
+    def test_get_labels_unauthenticated(self):
+        response = self.client.get("/labels")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Not authenticated")

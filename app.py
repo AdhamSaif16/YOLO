@@ -221,18 +221,24 @@ def get_uniqe_labels(user_id: int = Depends(get_current_user)):
     return {"labels": labels}
 
 @app.get("/prediction/{uid}")
-def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
-    prediction = query_prediction_by_uid(db, uid)
-    
-    if not prediction:
-        raise HTTPException(status_code=404, detail="Prediction not found")
-    
-    return {
-        "uid": prediction.uid,
-        "timestamp": prediction.timestamp,
-        "original_image": prediction.original_image,
-        "predicted_image": prediction.predicted_image
-    }
+def get_prediction_by_uid(uid: str, user_id: int = Depends(get_current_user)):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM prediction_sessions WHERE uid = ?", (uid,)).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+
+        if row["user_id"] is not None and row["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this prediction")
+
+        return {
+            "uid": row["uid"],
+            "timestamp": row["timestamp"],
+            "original_image": row["original_image"],
+            "predicted_image": row["predicted_image"]
+        }
+
 
 
 

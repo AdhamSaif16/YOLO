@@ -1,26 +1,21 @@
-import glob
-import time
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.responses import FileResponse, Response
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pytest import Session
-from ultralytics import YOLO
-from PIL import Image
-import sqlite3
 import os
+import time
 import uuid
 import shutil
-from typing import Optional
-from fastapi import Depends
+import sqlite3
+from typing import Optional, Annotated
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
+from fastapi.responses import FileResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starlette.status import HTTP_401_UNAUTHORIZED
-from typing import Annotated
+from PIL import Image
+from ultralytics import YOLO
 
-# Disable GPU usage
 import torch
-
 from db import get_db
 from repository import query_prediction_by_uid
-torch.cuda.is_available = lambda: False
+
 
 app = FastAPI()
 

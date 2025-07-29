@@ -1,69 +1,84 @@
 import unittest
-import os
-import sqlite3
-import base64
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from app import app, init_db, DB_PATH, add_test_user, save_prediction_session
+from app import app, get_prediction
+from db import get_db
 
-UID_OWNED = "get-owned-uid"
-UID_OTHER = "get-other-uid"
-ORIGINAL_PATH = f"uploads/original/{UID_OWNED}.jpg"
-PREDICTED_PATH = f"uploads/predicted/{UID_OWNED}.jpg"
 
-def auth_headers(username="user", password="pass"):
-    token = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
+client = TestClient(app)
+
+class FakePrediction:
+    def __init__(self, uid, timestamp, original_image, predicted_image, user_id):
+        self.uid = uid
+        self.timestamp = timestamp
+        self.original_image = original_image
+        self.predicted_image = predicted_image
+        self.user_id = user_id
+
 
 class TestGetPredictionByUID(unittest.TestCase):
-
     def setUp(self):
-        self.client = TestClient(app)
+        def override_get_db():
+            return MagicMock()
 
-        # Reset DB and folders
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
+        def override_get_current_user():
+            return 1  # logged in user_id
 
-        init_db()
-        add_test_user()  # inserts user:pass with id=1
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_prediction.__globals__["get_current_user"]] = override_get_current_user
 
-        os.makedirs("uploads/original", exist_ok=True)
-        os.makedirs("uploads/predicted", exist_ok=True)
+    def tearDown(self):
+        app.dependency_overrides = {}
 
-        # Create dummy files
-        with open(ORIGINAL_PATH, "wb") as f:
-            f.write(b"original image")
-        with open(PREDICTED_PATH, "wb") as f:
-            f.write(b"predicted image")
+    @patch("app.queries.get_prediction_by_uid")
+    def test_get_prediction_success(self, mock_query):
+        mock_query.return_value = FakePrediction(
+            uid="get-owned-uid",
+            timestamp="2023-01-01T10:00:00",
+            original_image="original.jpg",
+            predicted_image="predicted.jpg",
+            user_id=1
+        )
 
-        # Prediction owned by user 1
-        save_prediction_session(UID_OWNED, ORIGINAL_PATH, PREDICTED_PATH, user_id=1)
-
-        # Prediction owned by another user (user_id = 2)
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO users (username, pass) VALUES (?, ?)", ("user2", "pass2"))
-        save_prediction_session(UID_OTHER, "fake1.jpg", "fake2.jpg", user_id=2)
-
-    def test_get_prediction_success(self):
-        response = self.client.get(f"/prediction/{UID_OWNED}", headers=auth_headers())
+        response = client.get("/prediction/get-owned-uid", auth=("user", "pass"))
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["uid"], UID_OWNED)
+        self.assertEqual(data["uid"], "get-owned-uid")
         self.assertIn("timestamp", data)
         self.assertIn("original_image", data)
         self.assertIn("predicted_image", data)
 
-    def test_get_prediction_not_authenticated(self):
-        response = self.client.get(f"/prediction/{UID_OWNED}")
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["detail"], "Not authenticated")
-
-    def test_get_prediction_not_found(self):
-        response = self.client.get("/prediction/nonexistent-uid", headers=auth_headers())
+    @patch("app.queries.get_prediction_by_uid")
+    def test_get_prediction_not_found(self, mock_query):
+        mock_query.return_value = None
+        response = client.get("/prediction/nonexistent-uid", auth=("user", "pass"))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Prediction not found")
 
-    def test_get_prediction_not_authorized(self):
-        headers = auth_headers("user", "pass")  # logged in as user 1
-        response = self.client.get(f"/prediction/{UID_OTHER}", headers=headers)
+    @patch("app.queries.get_prediction_by_uid")
+    def test_get_prediction_not_authorized(self, mock_query):
+        # Simulate prediction owned by a different user (id=2)
+        mock_query.return_value = FakePrediction(
+            uid="get-other-uid",
+            timestamp="2023-01-01T11:00:00",
+            original_image="o2.jpg",
+            predicted_image="p2.jpg",
+            user_id=2
+        )
+
+        response = client.get("/prediction/get-other-uid", auth=("user", "pass"))
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["detail"], "Not authorized to access this prediction")
+        self.assertEqual(response.json()["detail"], "Unauthorized access to this prediction")
+
+    def test_get_prediction_not_authenticated(self):
+        # Temporarily remove override for this test
+        app.dependency_overrides.pop(get_prediction.__globals__["get_current_user"], None)
+        
+        response = client.get("/prediction/get-owned-uid")
+        
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Not authenticated")
+
+        # Restore it so it doesn’t affect other tests
+        app.dependency_overrides[get_prediction.__globals__["get_current_user"]] = lambda: 1
+

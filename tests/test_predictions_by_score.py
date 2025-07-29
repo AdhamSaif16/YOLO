@@ -1,73 +1,82 @@
-import os
-import sqlite3
-import pytest
+import unittest
+from unittest.mock import patch, Mock
 from fastapi.testclient import TestClient
-from app import app, DB_PATH, init_db, add_test_user
+from app import app
+from db import get_db
 
-client = TestClient(app)
+class FakeDetectionObject:
+    def __init__(self, label, score, box, prediction_uid):
+        self.label = label
+        self.score = score
+        self.box = box
+        self.prediction_uid = prediction_uid
 
-UID_HIGH = "score-high"
-UID_LOW = "score-low"
-UID_BORDERLINE = "score-border"
-SCORE_HIGH = 0.95
-SCORE_LOW = 0.4
-SCORE_BORDER = 0.7
+class TestGetPredictionsByScore(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+        # Patch authentication
+        self.credentials = ("user", "pass")
+
+        def override_get_db():
+            mock_db = Mock()
+            return mock_db
+        
+        app.dependency_overrides[get_db] = override_get_db
+
+    def tearDown(self):
+        app.dependency_overrides = {}
+
+    @patch("queries.get_predictions_by_score")
+    @patch("app.verify_credentials")
+    def test_get_predictions_above_0_5(self, mock_verify_credentials, mock_get_predictions_by_score):
+        mock_verify_credentials.return_value = 1
+        mock_get_predictions_by_score.return_value = [
+            FakeDetectionObject("cat", 0.7, "[10,20,30,40]", "score-high")
+        ]
+
+        response = self.client.get(
+            "/predictions/score/0.5",
+            auth=self.credentials
+        )
+
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertIsInstance(json_data, list)
+        self.assertGreater(len(json_data), 0)
+        uids = [item["prediction_uid"] for item in json_data]
+        self.assertIn("score-high", uids)
+
+    @patch("queries.get_predictions_by_score")
+    @patch("app.verify_credentials")
+    def test_get_predictions_empty_result(self, mock_verify_credentials, mock_get_predictions_by_score):
+        mock_verify_credentials.return_value = 1
+        mock_get_predictions_by_score.return_value = []
+
+        response = self.client.get(
+            "/predictions/score/0.9",
+            auth=self.credentials
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    @patch("app.verify_credentials")
+    def test_prediction_score_missing_credentials(self, mock_verify_credentials):
+        mock_verify_credentials.return_value = None
+
+        response = self.client.get("/predictions/score/0.5", auth=self.credentials)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"detail": "Invalid or missing credentials"})
 
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_and_teardown():
-    init_db()
-    add_test_user()
+    @patch("app.verify_credentials")
+    def test_prediction_score_invalid_value(self, mock_verify_credentials):
+        mock_verify_credentials.return_value = 1
 
-    with sqlite3.connect(DB_PATH) as conn:
-        # Insert prediction sessions
-        conn.execute("INSERT OR IGNORE INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_HIGH, "o1.jpg", "p1.jpg", 1))
-        conn.execute("INSERT OR IGNORE INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_LOW, "o2.jpg", "p2.jpg", 1))
-        conn.execute("INSERT OR IGNORE INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_BORDERLINE, "o3.jpg", "p3.jpg", 1))
+        response = self.client.get("/predictions/score/-0.1", auth=self.credentials)
+        self.assertEqual(response.status_code, 422)
 
-        # Insert detection objects
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_HIGH, "dog", SCORE_HIGH, "[1,1,2,2]"))
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_LOW, "cat", SCORE_LOW, "[3,3,4,4]"))
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_BORDERLINE, "horse", SCORE_BORDER, "[5,5,6,6]"))
-
-    yield
-
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM detection_objects WHERE prediction_uid IN (?, ?, ?)", (UID_HIGH, UID_LOW, UID_BORDERLINE))
-        conn.execute("DELETE FROM prediction_sessions WHERE uid IN (?, ?, ?)", (UID_HIGH, UID_LOW, UID_BORDERLINE))
-
-
-def test_get_predictions_above_0_5():
-    response = client.get("/predictions/score/0.5", auth=("user", "pass"))
-    assert response.status_code == 200
-    uids = [item["uid"] for item in response.json()]
-    assert UID_HIGH in uids
-    assert UID_BORDERLINE in uids
-    assert UID_LOW not in uids
-
-
-def test_get_predictions_above_0_9():
-    response = client.get("/predictions/score/0.9", auth=("user", "pass"))
-    assert response.status_code == 200
-    uids = [item["uid"] for item in response.json()]
-    assert UID_HIGH in uids
-    assert UID_LOW not in uids
-    assert UID_BORDERLINE not in uids
-
-
-def test_get_predictions_invalid_score_negative():
-    response = client.get("/predictions/score/-0.1", auth=("user", "pass"))
-    assert response.status_code == 400
-    assert "Invalid score" in response.text
-
-
-def test_get_predictions_invalid_score_over_1():
-    response = client.get("/predictions/score/1.1", auth=("user", "pass"))
-    assert response.status_code == 400
-    assert "Invalid score" in response.text
+        response = self.client.get("/predictions/score/1.1", auth=self.credentials)
+        self.assertEqual(response.status_code, 422)

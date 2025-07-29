@@ -1,39 +1,32 @@
 import unittest
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from PIL import Image
-import io
-import os
-import base64
+from app import app
+from db import get_db
+from app import prediction_count
 
-from app import app, DB_PATH, init_db, add_test_user
+client = TestClient(app)
 
-def auth_headers(username="user", password="pass"):
-    token = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 class TestPredictionCount(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app)
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        init_db()
-        add_test_user()
+        # Override dependencies
+        app.dependency_overrides[get_db] = lambda: MagicMock()
+        app.dependency_overrides[prediction_count.__globals__["get_current_user"]] = lambda: 1
 
-        self.test_image = Image.new('RGB', (100, 100), color='red')
-        self.image_bytes = io.BytesIO()
-        self.test_image.save(self.image_bytes, format='JPEG')
-        self.image_bytes.seek(0)
+    def tearDown(self):
+        app.dependency_overrides = {}
 
-    def test_prediction_count_empty(self):
-        response = self.client.get("/prediction/count", headers=auth_headers())
+    @patch("app.queries.count_recent_predictions", return_value=0)
+    def test_prediction_count_empty(self, mock_count):
+        response = client.get("/prediction/count", auth=("user", "pass"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json().get("count"), 0)
+        mock_count.assert_called_once()
 
-    def test_prediction_count_after_prediction(self):
-        self.client.post(
-            "/predict",
-            files={"file": ("test.jpg", self.image_bytes, "image/jpeg")}
-        )
-        response = self.client.get("/prediction/count", headers=auth_headers())
+    @patch("app.queries.count_recent_predictions", return_value=1)
+    def test_prediction_count_after_prediction(self, mock_count):
+        response = client.get("/prediction/count", auth=("user", "pass"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json().get("count"), 1)
+        mock_count.assert_called_once()

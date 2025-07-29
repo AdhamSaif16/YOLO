@@ -1,10 +1,10 @@
 from datetime import datetime
 import glob
 import time
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, Path, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pytest import Session
+from sqlalchemy.orm import Session 
 from ultralytics import YOLO
 from PIL import Image
 import sqlite3
@@ -15,13 +15,16 @@ from typing import Optional
 from fastapi import Depends
 from starlette.status import HTTP_401_UNAUTHORIZED
 from typing import Annotated
-from db import Base, engine
+from db import engine
+from models import Base
 from fastapi import Query
 import torch
 from fastapi.responses import FileResponse
 from db import get_db
 import queries
 torch.cuda.is_available = lambda: False
+
+
 
 app = FastAPI()
 
@@ -190,7 +193,8 @@ def delete_prediction(uid: str, db: Session = Depends(get_db), credentials: HTTP
     session = queries.get_prediction_by_uid(db, uid)
     if not session:
         raise HTTPException(status_code=404, detail="Prediction not found")
-
+    if session.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this prediction")
     # Delete image files if they exist
     for path in [session.original_image, session.predicted_image]:
         if os.path.exists(path):
@@ -216,13 +220,14 @@ def get_predictions_by_label(label: str, db: Session = Depends(get_db), user_id:
 
 @app.get("/predictions/score/{min_score}")
 def get_predictions_by_score(
-    min_score: float,
+    min_score: float = Path(..., ge=0.0, le=1.0),
     db: Session = Depends(get_db),
     user_id: int | None = Depends(get_current_user)
 ):
     if user_id is None:
         raise HTTPException(status_code=401, detail="Authentication required")
-
+    if min_score < 0 or min_score > 1:
+        raise HTTPException(status_code=400, detail="Invalid score")
     results = queries.get_predictions_by_score(db, user_id, min_score)
     return [
         {
@@ -249,13 +254,12 @@ def get_image(type: str, filename: str,user_id: int = Depends(get_current_user))
     return FileResponse(path)
 
 
-
 @app.get("/prediction/{uid}/image")
 def get_prediction_image(
     uid: str,
+    request: Request,
     credentials: Annotated[HTTPBasicCredentials, Depends(security)],
     db: Session = Depends(get_db),
-    
 ):
     user_id = verify_credentials(credentials, db)
     prediction = queries.get_prediction_by_uid(db, uid)
@@ -263,8 +267,20 @@ def get_prediction_image(
         raise HTTPException(status_code=404, detail="Prediction not found")
     if prediction.user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
-    print("Checking credentials:", credentials.username)
-    return FileResponse(prediction.predicted_image)
+
+    image_path = prediction.predicted_image
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Guess media type from file extension
+    if image_path.endswith(".png"):
+        media_type = "image/png"
+    elif image_path.endswith(".jpg") or image_path.endswith(".jpeg"):
+        media_type = "image/jpeg"
+    else:
+        media_type = "application/octet-stream"  # safest fallback
+
+    return FileResponse(image_path, media_type=media_type)
 
 
 

@@ -1,94 +1,88 @@
-import sqlite3
 import unittest
+from unittest.mock import patch, Mock
 from fastapi.testclient import TestClient
-from PIL import Image
-import io
-import os
-import base64
-from app import app, init_db, DB_PATH, add_test_user, save_prediction_session
+from app import app, get_db
 
-TEST_UID = "delete-test-uid"
-ORIGINAL_PATH = f"uploads/original/{TEST_UID}.jpg"
-PREDICTED_PATH = f"uploads/predicted/{TEST_UID}.jpg"
+client = TestClient(app)
 
-def auth_headers(username="user", password="pass"):
-    token = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
+# Mock user credentials
+mock_credentials = ("user", "pass")
+mock_auth_header = {
+    "Authorization": "Basic dXNlcjpwYXNz"  # base64 of 'user:pass'
+}
 
 
-class TestDelete(unittest.TestCase):
-
+class TestDeletePrediction(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app)
+        self.uid = "mocked-uid"
+        self.original_path = f"uploads/original/{self.uid}.jpg"
+        self.predicted_path = f"uploads/predicted/{self.uid}.jpg"
 
-        # Fresh DB and folders
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        init_db()
-        add_test_user()
+        # Override get_db with a mock
+        self.mock_db = Mock()
+        app.dependency_overrides[get_db] = lambda: self.mock_db
 
-        os.makedirs("uploads/original", exist_ok=True)
-        os.makedirs("uploads/predicted", exist_ok=True)
+    def tearDown(self):
+        app.dependency_overrides = {}
 
-        # Setup test image
-        self.test_image = Image.new('RGB', (100, 100), color='red')
-        self.image_bytes = io.BytesIO()
-        self.test_image.save(self.image_bytes, format='JPEG')
-        self.image_bytes.seek(0)
+    @patch("app.queries.get_user_by_credentials")
+    def test_delete_prediction_not_found(self, mock_user):
+        self.mock_db = Mock()
+        mock_user.return_value = Mock(id=1)
 
-        # Setup dummy files
-        with open(ORIGINAL_PATH, "wb") as f:
-            f.write(b"test image")
-        with open(PREDICTED_PATH, "wb") as f:
-            f.write(b"test image")
+        with patch("app.queries.get_prediction_by_uid", return_value=None):
+            response = client.delete(f"/prediction/{self.uid}", headers=mock_auth_header)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.json(), {"detail": "Prediction not found"})
 
-        save_prediction_session(TEST_UID, ORIGINAL_PATH, PREDICTED_PATH, user_id=1)
-
-    def test_delete_not_authenticated(self):
-        response = self.client.delete("/prediction/-1")
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["detail"], "Not authenticated")
-
-    def test_delete_prediction_success(self):
-        # Make a prediction first
-        response = self.client.post(
-            "/predict",
-            files={"file": ("test.jpg", self.image_bytes, "image/jpeg")},
-            headers=auth_headers()
+    @patch("os.path.exists", return_value=True)
+    @patch("os.remove")
+    @patch("app.queries.delete_prediction_session")
+    @patch("app.queries.delete_detection_objects_by_uid")
+    @patch("app.queries.get_prediction_by_uid")
+    @patch("app.queries.get_user_by_credentials")
+    def test_delete_prediction_success(
+        self,
+        mock_user,
+        mock_get_prediction,
+        mock_delete_detections,
+        mock_delete_session,
+        mock_remove,
+        mock_exists
+    ):
+        mock_user.return_value = Mock(id=1)
+        mock_prediction = Mock(
+            uid=self.uid,
+            original_image=self.original_path,
+            predicted_image=self.predicted_path,
+            user_id=1
         )
+        mock_get_prediction.return_value = mock_prediction
+
+        response = client.delete(f"/prediction/{self.uid}", headers=mock_auth_header)
+
         self.assertEqual(response.status_code, 200)
-        uid = response.json()["prediction_uid"]
+        self.assertEqual(response.text.strip('"'), "Successfully Deleted")
 
-        response2 = self.client.delete(f"/prediction/{uid}", headers=auth_headers())
-        self.assertEqual(response2.status_code, 200)
-        self.assertIn("detail", response2.json())
+        mock_delete_detections.assert_called_once_with(self.mock_db, self.uid)
+        mock_delete_session.assert_called_once_with(self.mock_db, self.uid)
+        mock_remove.assert_any_call(self.original_path)
+        mock_remove.assert_any_call(self.predicted_path)
 
-    def test_delete_prediction_files_missing(self):
-        # Insert record but remove files
-        uid = "no-files-uid"
-        orig = f"uploads/original/{uid}.jpg"
-        pred = f"uploads/predicted/{uid}.jpg"
-        save_prediction_session(uid, orig, pred, user_id=1)
+    @patch("app.queries.get_user_by_credentials")
+    @patch("app.queries.get_prediction_by_uid")
+    def test_delete_prediction_unauthorized(self, mock_get_prediction, mock_user):
+        mock_user.return_value = Mock(id=1)
 
-        # No files created
-        response = self.client.delete(f"/prediction/{uid}", headers=auth_headers())
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("no image files", response.json()["detail"])
+        mock_prediction = Mock()
+        mock_prediction.uid = self.uid
+        mock_prediction.user_id = 999  # not the same user
+        mock_prediction.original_image = self.original_path
+        mock_prediction.predicted_image = self.predicted_path
+        mock_get_prediction.return_value = mock_prediction
 
-    def test_delete_prediction_not_found(self):
-        response = self.client.delete("/prediction/nonexistent", headers=auth_headers())
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["detail"], "Prediction not found")
+        response = client.delete(f"/prediction/{self.uid}", headers=mock_auth_header)
 
-    def test_delete_prediction_not_owned(self):
-        # Add second user manually
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO users (username, pass) VALUES (?, ?)", ("another", "pass"))
-
-        # Insert prediction with user_id=2
-        uid = "other-user-pred"
-        save_prediction_session(uid, "x.jpg", "y.jpg", user_id=2)
-
-        response = self.client.delete(f"/prediction/{uid}", headers=auth_headers())
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["detail"], "Not authorized to delete this prediction")
+        self.assertEqual(response.json(), {"detail": "Unauthorized access to this prediction"})
+

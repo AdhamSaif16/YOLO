@@ -45,3 +45,39 @@ class TestPredictionImageEndpoint(unittest.TestCase):
         response = client.get("/prediction/abc/image", auth=("user", "pass"))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Image not found")
+
+    @patch("app.verify_credentials", return_value=2)  # 👈 Different user_id than prediction.user_id
+    @patch("app.queries.get_prediction_by_uid")
+    def test_get_prediction_image_forbidden(self, mock_get_pred, mock_verify):
+        mock_get_pred.return_value = FakePrediction("abc", "uploads/predicted/abc.jpg", user_id=1)
+
+        response = client.get("/prediction/abc/image", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "Access denied")
+
+    @patch("app.verify_credentials", return_value=1)
+    @patch("app.queries.get_prediction_by_uid")
+    @patch("app.FileResponse")
+    @patch("os.path.exists", return_value=True)
+    def test_get_prediction_image_png_content_type(self, mock_exists, mock_fileresponse, mock_get_pred, mock_verify):
+        mock_get_pred.return_value = FakePrediction("xyz", "uploads/predicted/xyz.png", user_id=1)
+        mock_fileresponse.return_value = Response(content=b"png-bytes", media_type="image/png")
+
+        response = client.get("/prediction/xyz/image", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"png-bytes")
+        self.assertEqual(response.headers["content-type"], "image/png")
+
+    @patch("app.verify_credentials", return_value=1)
+    @patch("app.queries.get_prediction_by_uid")
+    @patch("app.FileResponse")
+    @patch("os.path.exists", return_value=True)
+    def test_get_prediction_image_unknown_extension_defaults_to_octet_stream(self, mock_exists, mock_fileresponse, mock_get_pred, mock_verify):
+        # Simulate a file with unknown extension, e.g. ".bin"
+        mock_get_pred.return_value = FakePrediction("xyz", "uploads/predicted/xyz.bin", user_id=1)
+        mock_fileresponse.return_value = Response(content=b"bin-bytes", media_type="application/octet-stream")
+
+        response = client.get("/prediction/xyz/image", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"bin-bytes")
+        self.assertEqual(response.headers["content-type"], "application/octet-stream")

@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch, MagicMock
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 import io
@@ -130,3 +131,61 @@ class TestPredictEndpoint(unittest.TestCase):
         json_data = response.json()
         self.assertEqual(json_data["detection_count"], 1)
         self.assertEqual(json_data["labels"], ["person"])
+        
+    def test_optional_auth_returns_none_on_invalid_credentials(self):
+        """
+        This test ensures the optional_auth helper returns None
+        when authentication is missing or invalid.
+        """
+        # Remove override to test the actual function
+        if predict.__globals__["optional_auth"] in app.dependency_overrides:
+            del app.dependency_overrides[predict.__globals__["optional_auth"]]
+
+        with patch("app.verify_credentials", return_value=None), \
+            patch("app.model") as mock_model:
+
+            mock_result = MagicMock()
+            mock_result.boxes = []
+            mock_result.plot.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
+            mock_model.return_value = [mock_result]
+            mock_model.names = ["person"]
+
+            response = client.post(
+                "/predict",
+                files={"file": ("test.jpg", self.image_bytes, "image/jpeg")}
+                # No headers → triggers optional_auth without credentials
+            )
+
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertIn("prediction_uid", json_data)
+    @patch("app.model")
+    @patch("app.queries.save_prediction_session")
+    def test_predict_with_http_exception_in_credentials(self, mock_save_session, mock_model):
+        """
+        This test covers the code path where verify_credentials raises HTTPException
+        inside the /predict endpoint.
+        """
+        mock_result = MagicMock()
+        mock_result.boxes = []
+        mock_result.plot.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
+        mock_model.return_value = [mock_result]
+        mock_model.names = ["person"]
+
+        # Provide mocked credentials through dependency override
+        app.dependency_overrides[predict.__globals__["optional_auth"]] = lambda: MagicMock(username="bad", password="bad")
+
+        # Simulate that verify_credentials raises HTTPException
+        with patch("app.verify_credentials", side_effect=HTTPException(status_code=401, detail="Invalid credentials")):
+            response = client.post(
+                "/predict",
+                headers=encode_credentials("bad", "bad"),
+                files={"file": ("test.jpg", self.image_bytes, "image/jpeg")}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertIn("prediction_uid", json_data)
+        self.assertIn("labels", json_data)
+
+        

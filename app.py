@@ -220,7 +220,7 @@ def get_predictions_by_label(label: str, db: Session = Depends(get_db), user_id:
 
 @app.get("/predictions/score/{min_score}")
 def get_predictions_by_score(
-    min_score: float = Path(..., ge=0.0, le=1.0),
+    min_score: float = Path(...),
     db: Session = Depends(get_db),
     user_id: int | None = Depends(get_current_user)
 ):
@@ -282,10 +282,6 @@ def get_prediction_image(
 
     return FileResponse(image_path, media_type=media_type)
 
-
-
-
-    
 
 @app.get("/health")
 def health():

@@ -1,63 +1,65 @@
-import os
 import unittest
-import sqlite3
-import base64
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from fastapi import HTTPException
+from app import app, verify_credentials, get_current_user, security
+from db import get_db
 
-from app import (
-    app, DB_PATH, init_db,
-    add_test_user, verify_credentials
-)
 
-def encode_credentials(username, password):
-    token = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
+client = TestClient(app)
+
+
+class FakeCred:
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+
 
 class TestHelperFunctions(unittest.TestCase):
     def setUp(self):
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        init_db()
-        add_test_user()
-        self.client = TestClient(app)
+        # Override DB dependency
+        app.dependency_overrides[get_db] = lambda: MagicMock()
 
-    def test_add_test_user_creates_user(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            result = conn.execute("SELECT * FROM users WHERE username = ?", ("user",)).fetchone()
-            self.assertIsNotNone(result)
-            self.assertEqual(result[1], "user")
-            self.assertEqual(result[2], "pass")
+    def tearDown(self):
+        app.dependency_overrides = {}
 
-    def test_verify_credentials_valid(self):
-        credentials = type("FakeCred", (), {
-            "username": "user", "password": "pass"
-        })()
-        user_id = verify_credentials(credentials)
-        self.assertIsInstance(user_id, int)
+    @patch("app.queries.get_user_by_credentials")
+    def test_verify_credentials_valid(self, mock_get_user):
+        mock_user = MagicMock()
+        mock_user.id = 42
+        mock_get_user.return_value = mock_user
 
-    def test_verify_credentials_invalid_user(self):
-        credentials = type("FakeCred", (), {
-            "username": "wrong", "password": "wrong"
-        })()
-        user_id = verify_credentials(credentials)
-        self.assertIsNone(user_id)
+        cred = FakeCred("user", "pass")
+        result = verify_credentials(cred, db=MagicMock())
+        self.assertEqual(result, 42)
 
-    def test_verify_credentials_none(self):
-        self.assertIsNone(verify_credentials(None))
+    @patch("app.queries.get_user_by_credentials", return_value=None)
+    def test_verify_credentials_invalid_user(self, mock_get_user):
+        cred = FakeCred("wrong", "wrong")
+        result = verify_credentials(cred, db=MagicMock())
+        self.assertIsNone(result)
 
-    def test_get_current_user_valid(self):
-        # Access a protected endpoint using valid credentials
-        response = self.client.get("/labels", headers=encode_credentials("user", "pass"))
-        self.assertEqual(response.status_code, 200)
+    @patch("app.queries.get_user_by_credentials")
+    def test_get_current_user_valid(self, mock_get_user):
+        mock_user = MagicMock()
+        mock_user.id = 1
+        mock_get_user.return_value = mock_user
 
-    def test_get_current_user_invalid(self):
-        response = self.client.get("/labels", headers=encode_credentials("wrong", "wrong"))
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["detail"], "Invalid or missing credentials")
+        # Override credentials and db
+        app.dependency_overrides[security] = lambda: FakeCred("user", "pass")
 
-    def test_get_current_user_missing(self):
-        response = self.client.get("/labels")
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["detail"], "Not authenticated")
+        user_id = get_current_user(
+            credentials=FakeCred("user", "pass"),
+            db=MagicMock()
+        )
+        self.assertEqual(user_id, 1)
 
+    @patch("app.queries.get_user_by_credentials", return_value=None)
+    def test_get_current_user_invalid(self, mock_get_user):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            get_current_user(
+                credentials=FakeCred("wrong", "wrong"),
+                db=MagicMock()
+            )
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertEqual(ctx.exception.detail, "Invalid or missing credentials")

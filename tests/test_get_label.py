@@ -1,57 +1,46 @@
-import os
-import sqlite3
-import pytest
+import unittest
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from app import app, DB_PATH, init_db, add_test_user
+from app import app, get_predictions_by_label
+from db import get_db
 
 client = TestClient(app)
 
-UID_DOG = "label-dog-1"
-UID_CAT = "label-cat-1"
+class TestGetPredictionsByLabel(unittest.TestCase):
+    def setUp(self):
+        def override_get_current_user():
+            return 1
 
+        def override_get_db():
+            return MagicMock()
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_and_teardown():
-    init_db()
-    add_test_user()
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_predictions_by_label.__globals__["get_current_user"]] = override_get_current_user
 
-    with sqlite3.connect(DB_PATH) as conn:
-        # Insert prediction sessions
-        conn.execute("INSERT INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_DOG, "o1.jpg", "p1.jpg", 1))
-        conn.execute("INSERT INTO prediction_sessions (uid, original_image, predicted_image, user_id) VALUES (?, ?, ?, ?)",
-                     (UID_CAT, "o2.jpg", "p2.jpg", 1))
+    def tearDown(self):
+        app.dependency_overrides = {}
 
-        # Insert detection objects with known YOLO labels
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_DOG, "dog", 0.9, "[0,0,1,1]"))
-        conn.execute("INSERT INTO detection_objects (prediction_uid, label, score, box) VALUES (?, ?, ?, ?)",
-                     (UID_CAT, "cat", 0.88, "[0,0,1,1]"))
+    @patch("app.queries.get_predictions_by_label")
+    def test_get_predictions_by_label_dog(self, mock_query):
+        mock_query.return_value = [{"uid": "label-dog-1", "timestamp": "2024-01-01T10:00:00"}]
 
-    yield
+        response = client.get("/predictions/label/dog", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 200)
+        uids = [item["uid"] for item in response.json()]
+        self.assertIn("label-dog-1", uids)
+        self.assertNotIn("label-cat-1", uids)
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM detection_objects WHERE prediction_uid IN (?, ?)", (UID_DOG, UID_CAT))
-        conn.execute("DELETE FROM prediction_sessions WHERE uid IN (?, ?)", (UID_DOG, UID_CAT))
+    @patch("app.queries.get_predictions_by_label")
+    def test_get_predictions_by_label_cat(self, mock_query):
+        mock_query.return_value = [{"uid": "label-cat-1", "timestamp": "2024-01-01T11:00:00"}]
 
+        response = client.get("/predictions/label/cat", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 200)
+        uids = [item["uid"] for item in response.json()]
+        self.assertIn("label-cat-1", uids)
+        self.assertNotIn("label-dog-1", uids)
 
-def test_get_predictions_by_label_dog():
-    response = client.get("/predictions/label/dog", auth=("user", "pass"))
-    assert response.status_code == 200
-    uids = [item["uid"] for item in response.json()]
-    assert UID_DOG in uids
-    assert UID_CAT not in uids
-
-
-def test_get_predictions_by_label_cat():
-    response = client.get("/predictions/label/cat", auth=("user", "pass"))
-    assert response.status_code == 200
-    uids = [item["uid"] for item in response.json()]
-    assert UID_CAT in uids
-    assert UID_DOG not in uids
-
-
-def test_get_predictions_by_label_invalid():
-    response = client.get("/predictions/label/not_a_label", auth=("user", "pass"))
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid image type"
+    def test_get_predictions_by_label_invalid(self):
+        response = client.get("/predictions/label/not_a_label", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Invalid label")

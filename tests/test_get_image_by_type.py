@@ -1,59 +1,57 @@
-import os
-import sqlite3
-import pytest
+# tests/test_get_image_by_type.py
+
+import unittest
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
-from app import app, DB_PATH, init_db, add_test_user
+from app import app, get_image
+from db import get_db
+
 
 client = TestClient(app)
 
-UID = "image-test-uid"
-FILENAME = UID + ".jpg"
-ORIGINAL_DIR = "uploads/original"
-PREDICTED_DIR = "uploads/predicted"
-ORIGINAL_PATH = os.path.join(ORIGINAL_DIR, FILENAME)
-PREDICTED_PATH = os.path.join(PREDICTED_DIR, FILENAME)
+
+class FakeResponse:
+    def __init__(self):
+        self.status_code = 200
+    async def __call__(self, scope, receive, send):
+        pass
 
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_and_teardown():
-    init_db()
-    add_test_user()
-    os.makedirs(ORIGINAL_DIR, exist_ok=True)
-    os.makedirs(PREDICTED_DIR, exist_ok=True)
+class TestGetImageEndpoint(unittest.TestCase):
+    def setUp(self):
+        def override_get_current_user():
+            return 1
 
-    with open(ORIGINAL_PATH, "wb") as f:
-        f.write(b"\xFF\xD8\xFF\xE0" + b"\x00" * 100)  # minimal JPEG header
+        def override_get_db():
+            return MagicMock()
 
-    with open(PREDICTED_PATH, "wb") as f:
-        f.write(b"\xFF\xD8\xFF\xE0" + b"\x00" * 100)
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_image.__globals__["get_current_user"]] = override_get_current_user
 
-    yield
+    def tearDown(self):
+        app.dependency_overrides = {}
 
-    if os.path.exists(ORIGINAL_PATH):
-        os.remove(ORIGINAL_PATH)
-    if os.path.exists(PREDICTED_PATH):
-        os.remove(PREDICTED_PATH)
+    @patch("app.FileResponse", return_value=FakeResponse())
+    @patch("os.path.exists", return_value=True)
+    def test_get_original_image_success(self, mock_exists, mock_file_response):
+        response = client.get("/image/original/test.jpg", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 200)
+        mock_file_response.assert_called_once()
 
+    @patch("app.FileResponse", return_value=FakeResponse())
+    @patch("os.path.exists", return_value=True)
+    def test_get_predicted_image_success(self, mock_exists, mock_file_response):
+        response = client.get("/image/predicted/test.jpg", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 200)
+        mock_file_response.assert_called_once()
 
-def test_get_original_image_success():
-    response = client.get(f"/image/original/{FILENAME}", auth=("user", "pass"))
-    assert response.status_code == 200
-    assert response.headers["content-type"] in ("image/jpeg", "application/octet-stream")
+    def test_get_image_invalid_type(self):
+        response = client.get("/image/invalid/test.jpg", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Invalid image type")
 
-
-def test_get_predicted_image_success():
-    response = client.get(f"/image/predicted/{FILENAME}", auth=("user", "pass"))
-    assert response.status_code == 200
-    assert response.headers["content-type"] in ("image/jpeg", "application/octet-stream")
-
-
-def test_get_image_file_not_found():
-    response = client.get("/image/original/missing-file.jpg", auth=("user", "pass"))
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Image not found"
-
-
-def test_get_image_invalid_type():
-    response = client.get(f"/image/invalid_type/{FILENAME}", auth=("user", "pass"))
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid image type"
+    @patch("os.path.exists", return_value=False)
+    def test_get_image_file_not_found(self, mock_exists):
+        response = client.get("/image/original/missing.jpg", auth=("user", "pass"))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Image not found")

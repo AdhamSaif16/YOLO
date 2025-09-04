@@ -1,5 +1,6 @@
 from datetime import datetime
 import glob
+import re
 import time
 from fastapi import FastAPI, Path, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, Response
@@ -22,6 +23,8 @@ import torch
 from fastapi.responses import FileResponse
 from db import get_db
 import queries
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 torch.cuda.is_available = lambda: False
 
 
@@ -33,6 +36,8 @@ security = HTTPBasic()
 UPLOAD_DIR = "uploads/original"
 PREDICTED_DIR = "uploads/predicted"
 DB_PATH = "predictions.db"
+AWS_REGION = os.getenv("AWS_REGION")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 labels = [
    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
 ]
@@ -74,6 +79,22 @@ def get_current_user(
             headers={"WWW-Authenticate": "Basic"},
         )
     return user_id
+
+s3 = boto3.client("s3", region_name=AWS_REGION) if AWS_REGION else None
+
+def require_s3():
+    if not AWS_REGION or not AWS_S3_BUCKET:
+        raise HTTPException(status_code=500, detail="S3 not configured (AWS_REGION/AWS_S3_BUCKET).")
+    if s3 is None:
+        raise HTTPException(status_code=500, detail="S3 client not initialized.")
+    return s3
+
+def _safe_prefix(raw: str | None) -> str:
+    if not raw:
+        return "anonymous"
+    # allow letters, digits, slash, dash, underscore (avoid weird chars)
+    safe = re.sub(r"[^a-zA-Z0-9/_-]", "_", raw)
+    return safe or "anonymous"
 ##########################################################  end of helper functions ############################################
 # Initialize SQLite
 
@@ -88,38 +109,89 @@ queries.add_test_user(db)
 @app.post("/predict")
 async def predict(
     request: Request,
-    file: UploadFile = File(...),
-    credentials: Annotated[Optional[HTTPBasicCredentials], Depends(optional_auth)] = None
+    file: UploadFile = File(None),
+    credentials: Annotated[Optional[HTTPBasicCredentials], Depends(optional_auth)] = None,
+    img: Optional[str] = Query(None, description="S3 key of the image inside your bucket"),
+    chat_id: Optional[str] = Query(None, description="Chat/session id used as S3 folder prefix")
 ):
     """
     Predict objects in an image
     """
+    start_time = time.time()
+
+    uid = str(uuid.uuid4())
     db = next(get_db())
+
     username = None
     if credentials:
         try:
-            username = verify_credentials(credentials,db)
+            username = verify_credentials(credentials, db)
         except HTTPException:
-            username = None     #Invalid credentials still allow prediction, username remains null
+            username = None
 
-    start_time = time.time()
+    # who’s folder (for S3 organization)
+    # precedence: chat_id (from caller) -> username (if authenticated) -> "anonymous"
+    prefix = _safe_prefix(chat_id) if chat_id else _safe_prefix(str(username) if username else None)
 
-    ext = os.path.splitext(file.filename)[1]
-    uid = str(uuid.uuid4())
-    original_path = os.path.join(UPLOAD_DIR, uid + ext)
-    predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
+    predicted_key = None  # will be set for S3 flow
 
-    with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    # Either: S3 download (if img=...) OR classic file upload (if file sent)
+    if img:
+        s3_client = require_s3()
+        ext = os.path.splitext(img)[1] or ".jpg"
+        original_path = os.path.join(UPLOAD_DIR, uid + ext)  # temp local for inference
+        try:
+            s3_client.download_file(AWS_S3_BUCKET, img, original_path)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("NoSuchKey", "404"):
+                raise HTTPException(status_code=404, detail=f"S3 key not found: {img}")
+            raise HTTPException(status_code=502, detail=f"S3 download error: {str(e)}")
 
-    results = model(original_path, device="cpu")
+        results = model(original_path, device="cpu")
 
-    annotated_frame = results[0].plot()
-    annotated_image = Image.fromarray(annotated_frame)
-    annotated_image.save(predicted_path)
+        # Create annotated image and upload to S3 under <prefix>/predicted/<uuid>.<ext>
+        annotated_frame = results[0].plot()
+        annotated_image = Image.fromarray(annotated_frame)
 
-    
-    queries.save_prediction_session(db,uid, original_path, predicted_path,username)
+        import tempfile
+        predicted_key = f"{prefix}/predicted/{uid}{ext}"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp_path = tmp.name
+        annotated_image.save(tmp_path)
+        try:
+            s3_client.upload_file(tmp_path, AWS_S3_BUCKET, predicted_key)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    else:
+        if file is None:
+            raise HTTPException(status_code=400, detail="Provide either a file or ?img=<s3_key>")
+
+        ext = os.path.splitext(file.filename)[1]
+        original_path = os.path.join(UPLOAD_DIR, uid + ext)
+        with open(original_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        results = model(original_path, device="cpu")
+
+        # Local flow: keep your existing local behavior
+        annotated_frame = results[0].plot()
+        annotated_image = Image.fromarray(annotated_frame)
+        predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
+        annotated_image.save(predicted_path)
+
+    # Persist session + detections (store S3 URIs if S3 flow)
+    queries.save_prediction_session(
+        db,
+        uid,
+        f"s3://{AWS_S3_BUCKET}/{img}" if img else original_path,
+        f"s3://{AWS_S3_BUCKET}/{predicted_key}" if img else predicted_path,
+        username
+    )
 
     detected_labels = []
     for box in results[0].boxes:
@@ -138,6 +210,7 @@ async def predict(
         "labels": detected_labels,
         "time_took": processing_time
     }
+
 
 @app.get("/prediction/count")
 def prediction_count(db: Session = Depends(get_db), credentials: HTTPBasicCredentials = Depends(security)) -> dict:

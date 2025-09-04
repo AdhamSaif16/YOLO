@@ -1,0 +1,58 @@
+# Ignore version control
+.git
+.gitignore
+.gitattributes
+
+# Ignore Python cache and environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.venv/
+env/
+venv/
+
+# Ignore dependencies (you should install inside container instead)
+node_modules/
+*.egg-info/
+*.egg
+*.whl
+
+# Ignore logs and temp files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Ignore IDE/editor settings
+.vscode/
+.idea/
+*.iml
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore Docker files that shouldn’t go into image
+docker-compose*.yml
+Dockerfile*
+
+# Ignore build/test artifacts
+dist/
+build/
+coverage/
+*.out
+*.cov
+*.pid
+*.seed
+*.gz
+*.zip
+*.tar
+*.tgz
+
+# Ignore uploads or large local data
+uploads/
+data/
+media/

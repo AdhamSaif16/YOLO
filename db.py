@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 DB_BACKEND = os.getenv("DB_BACKEND", "sqlite")
 
 if DB_BACKEND == "postgres":
-    DATABASE_URL = "postgresql://user:pass@localhost/db"
+    DATABASE_URL = "postgresql://user:password@postgres/predictions"
 else:
     DATABASE_URL = "sqlite:///./predictions.db"
 

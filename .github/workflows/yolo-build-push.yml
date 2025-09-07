@@ -24,4 +24,4 @@ jobs:
         docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/yolo5tech:$TAG .
         
         # Push the image to DockerHub
-        docker push ${{ secrets.DOCKERHUB_USERNAME }}/yolo:$TAG
+        docker push ${{ secrets.DOCKERHUB_USERNAME }}/yolo5tech:$TAG
